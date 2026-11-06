@@ -1,0 +1,249 @@
+#include "engine/affinity.hpp"
+#include "engine/decoder.hpp"
+#include "engine/detector_pool.hpp"
+#include "engine/jpeg_preview.hpp"
+
+#include <pybind11/pybind11.h>
+#include <cstring>
+#include <thread>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+
+extern "C"
+{
+#include <libavdevice/avdevice.h>
+}
+
+namespace py = pybind11;
+using namespace nvr;
+
+// A request context is serialized; live workers have their own independent contexts.
+class Predictor
+{
+    std::mutex mutex_;
+    std::unique_ptr<DmaBuffer> image_;
+    Detector detector_;
+
+public:
+    Predictor(const std::string &model, bool nms)
+        : detector_(model, "rga", false, .25f, .45f, RKNN_NPU_CORE_ALL, nms) {}
+
+    Json frame(const Frame &frame, float confidence, float iou)
+    {
+        prefer_performance_cpus();
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Request buffers and live decoder pools can reuse file descriptors.
+        detector_.clear_sources();
+        detector_.configure(confidence, iou);
+        try
+        {
+            auto result = detector_.infer(frame);
+            detector_.clear_sources();
+            return result;
+        }
+        catch (...)
+        {
+            detector_.clear_sources();
+            throw;
+        }
+    }
+
+    std::string image(const std::string &pixels, int width, int height, float confidence, float iou)
+    {
+        prefer_performance_cpus();
+        auto entered = Clock::now();
+        std::lock_guard<std::mutex> lock(mutex_);
+        double wait_ms = milliseconds(entered);
+        auto upload_started = Clock::now();
+        require(width > 0 && height > 0 && width <= 8192 && height <= 8192 &&
+                    width % 2 == 0 && height % 2 == 0 &&
+                    pixels.size() == size_t(width) * height * 3 / 2, "invalid NV12 image");
+        detector_.clear_sources();
+        int hs = (width + 15) & ~15, vs = (height + 15) & ~15;
+        size_t size = size_t(hs) * vs * 3 / 2;
+        if (!image_ || image_->size < size)
+        {
+            image_ = std::make_unique<DmaBuffer>(size);
+        }
+        dma_buf_sync sync{};
+        sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
+        require(ioctl(image_->fd, DMA_BUF_IOCTL_SYNC, &sync) == 0, "sync uploaded image");
+        auto *base = static_cast<uint8_t *>(image_->data);
+        for (int row = 0; row < height; ++row)
+            std::memcpy(base + size_t(row) * hs, pixels.data() + size_t(row) * width, width);
+        for (int row = 0; row < height / 2; ++row)
+            std::memcpy(base + size_t(hs) * vs + size_t(row) * hs,
+                        pixels.data() + size_t(width) * height + size_t(row) * width, width);
+        sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+        require(ioctl(image_->fd, DMA_BUF_IOCTL_SYNC, &sync) == 0, "finish uploaded image sync");
+        MppBufferInfo info{};
+        info.type = MPP_BUFFER_TYPE_EXT_DMA;
+        info.fd = image_->fd;
+        info.size = image_->size;
+        MppBuffer buffer = nullptr;
+        require(mpp_buffer_import(&buffer, &info) == MPP_OK, "import uploaded image");
+        MppFrame raw = nullptr;
+        auto rc = mpp_frame_init(&raw);
+        if (rc != MPP_OK) { mpp_buffer_put(buffer); throw std::runtime_error("create image frame"); }
+        Frame frame(raw);
+        mpp_frame_set_width(raw, width);
+        mpp_frame_set_height(raw, height);
+        mpp_frame_set_hor_stride(raw, hs);
+        mpp_frame_set_ver_stride(raw, vs);
+        mpp_frame_set_fmt(raw, MPP_FMT_YUV420SP);
+        mpp_frame_set_buffer(raw, buffer);
+        mpp_buffer_put(buffer);
+        detector_.configure(confidence, iou);
+        double upload_ms = milliseconds(upload_started);
+        auto result = detector_.infer(frame);
+        result["context_wait_ms"] = wait_ms;
+        result["dma_upload_ms"] = upload_ms;
+        return result.dump();
+    }
+
+    std::string description() const { return detector_.description.dump(); }
+};
+
+class Live
+{
+    std::atomic<bool> stop_{false};
+    FrameQueue queue_{6};
+    // Destruction order: retained frames and consumers before the decoder.
+    std::unique_ptr<Decoder> decoder_;
+    std::unique_ptr<DetectorPool> pool_;
+    std::unique_ptr<JpegPreview> preview_;
+    std::mutex mutex_;
+    FramePtr latest_;
+    Json result_;
+    std::vector<uint8_t> jpeg_;
+    std::string error_;
+    bool ended_ = false;
+    std::thread thread_;
+
+public:
+    Live(const std::string &source, const std::string &model, int workers, bool nms)
+    {
+        avdevice_register_all();
+        decoder_ = std::make_unique<Decoder>(source, stop_, source.rfind("/dev/video", 0) == 0);
+        pool_ = std::make_unique<DetectorPool>(model, "rga", false, .25f, .45f, workers, nms);
+        preview_ = std::make_unique<JpegPreview>();
+        thread_ = std::thread([this, source]
+        {
+            std::thread producer;
+            try
+            {
+                producer = std::thread([this, source]
+                {
+                    try
+                    {
+                        const bool file = source.find("://") == std::string::npos &&
+                                          source.rfind("/dev/", 0) != 0;
+                        auto start = Clock::now();
+                        double first = -1;
+                        decoder_->run([&](FramePtr frame)
+                        {
+                            // File playback follows media time; cameras/RTSP are already paced.
+                            if (file && frame->pts_us != AV_NOPTS_VALUE)
+                            {
+                                if (first < 0) first = double(frame->pts_us);
+                                double due = (double(frame->pts_us) - first) / 1000;
+                                while (!stop_ && milliseconds(start) < due)
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                            }
+                            queue_.push(std::move(frame), false, stop_);
+                        });
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        error_ = e.what();
+                    }
+                    queue_.close();
+                });
+                auto last_preview = Clock::now() - std::chrono::seconds(1);
+                pool_->run(queue_, [this](const Frame &) { return !stop_; },
+                    [&](const Frame &frame, Json result)
+                    {
+                        // Keep JPEG paired with its detections, at most 10 previews/s.
+                        if (milliseconds(last_preview) < 100) return;
+                        auto jpeg = preview_->encode(frame);
+                        MppFrame raw = nullptr;
+                        require(mpp_frame_init(&raw) == MPP_OK, "retain live frame");
+                        auto retained = std::make_shared<Frame>(raw);
+                        mpp_frame_set_width(raw, mpp_frame_get_width(frame.value));
+                        mpp_frame_set_height(raw, mpp_frame_get_height(frame.value));
+                        mpp_frame_set_hor_stride(raw, mpp_frame_get_hor_stride(frame.value));
+                        mpp_frame_set_ver_stride(raw, mpp_frame_get_ver_stride(frame.value));
+                        mpp_frame_set_fmt(raw, MPP_FMT_YUV420SP);
+                        mpp_frame_set_buffer(raw, mpp_frame_get_buffer(frame.value));
+                        retained->sequence = frame.sequence;
+                        retained->pts_us = frame.pts_us;
+                        retained->decoded_at = frame.decoded_at;
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        latest_ = std::move(retained);
+                        result_ = std::move(result);
+                        jpeg_ = std::move(jpeg);
+                        last_preview = Clock::now();
+                    });
+            }
+            catch (const std::exception &e)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                error_ = e.what();
+                stop_ = true;
+                queue_.close();
+            }
+            if (producer.joinable()) producer.join();
+            std::lock_guard<std::mutex> lock(mutex_);
+            ended_ = true;
+        });
+    }
+
+    ~Live() { close(); }
+    void close()
+    {
+        stop_ = true;
+        queue_.close();
+        if (thread_.joinable()) thread_.join();
+        queue_.clear();
+        latest_.reset();
+        preview_.reset();
+        pool_.reset();
+        decoder_.reset();
+    }
+    void configure(float confidence, float iou) { pool_->configure(confidence, iou); }
+    std::string description() const { return pool_->description.dump(); }
+    std::string predict(Predictor &predictor, float confidence, float iou)
+    {
+        FramePtr frame;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            frame = latest_;
+        }
+        require(bool(frame), "live source has no frame yet");
+        return predictor.frame(*frame, confidence, iou).dump();
+    }
+    py::tuple snapshot()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Json state = {{"result", result_}, {"error", error_}, {"ended", ended_},
+                      {"dropped", queue_.dropped.load()}};
+        return py::make_tuple(state.dump(), py::bytes(reinterpret_cast<const char *>(jpeg_.data()), jpeg_.size()));
+    }
+};
+
+PYBIND11_MODULE(_native, m)
+{
+    py::class_<Predictor>(m, "Predictor")
+        .def(py::init<const std::string &, bool>(), py::arg("model"), py::arg("nms") = true)
+        .def("predict", &Predictor::image, py::call_guard<py::gil_scoped_release>())
+        .def("description", &Predictor::description);
+    py::class_<Live>(m, "Live")
+        .def(py::init<const std::string &, const std::string &, int, bool>(),
+             py::arg("source"), py::arg("model"), py::arg("workers") = 0, py::arg("nms") = true)
+        .def("configure", &Live::configure)
+        .def("description", &Live::description)
+        .def("predict", &Live::predict, py::call_guard<py::gil_scoped_release>())
+        .def("snapshot", &Live::snapshot)
+        .def("close", &Live::close, py::call_guard<py::gil_scoped_release>());
+}

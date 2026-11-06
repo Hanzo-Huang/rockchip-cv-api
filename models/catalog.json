@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "yolo26n-rk3576",
+      "name": "YOLO26n",
+      "family": "yolo26",
+      "chip": "rk3576",
+      "task": "detection",
+      "backend": "yolo",
+      "tag": "rk3576-yolo26",
+      "file": "models/yolo26n-rk3576/yolo26n_rk3576.rknn",
+      "sha256": "5f4396d0cc544a46eead03b530fb00a8b308714f138da5a11610d3e6dab876bc",
+      "metadata": "models/yolo26n-rk3576/metadata.yaml",
+      "nms": true
+    },
+    {
+      "id": "yolo26n-rk3588",
+      "name": "YOLO26n",
+      "family": "yolo26",
+      "chip": "rk3588",
+      "task": "detection",
+      "backend": "yolo",
+      "tag": "rk3588-yolo26",
+      "file": "models/yolo26n-rk3588/yolo26n_rk3588.rknn",
+      "sha256": "604387bf8e6a4ac69bd39fff344b1039e4348385e8aaa81474fdd8181d9bab08",
+      "metadata": "models/yolo26n-rk3588/metadata.yaml",
+      "nms": true
+    }
+  ]
+}
