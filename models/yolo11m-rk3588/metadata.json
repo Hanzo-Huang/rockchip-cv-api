@@ -1,0 +1,26 @@
+{
+  "model": "yolo11m",
+  "author": "Ultralytics",
+  "license": "AGPL-3.0",
+  "source_url": "https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolo11/yolo11m.onnx",
+  "onnx_sha256": "ebe968171cadc6f6ee4b107c6bca2674b0838b00df349a0d4669504b35161aa5",
+  "compiled_onnx_sha256": "ebe968171cadc6f6ee4b107c6bca2674b0838b00df349a0d4669504b35161aa5",
+  "transformations": [],
+  "chip": "rk3588",
+  "toolkit": "2.3.2",
+  "precision": "INT8",
+  "input_shape": [
+    1,
+    3,
+    640,
+    640
+  ],
+  "output_layout": "dfl-9-int8",
+  "nms": true,
+  "classes": 80,
+  "dataset": "COCO",
+  "calibration_images": 20,
+  "calibration_images_sha256": "0db973d395dadbb7ab587979c2ac38f661ead4fd99b58d252fc08ac7f12474bc",
+  "sha256": "54c07df35c614b10e0e6949af86555477355847ff403b1833bac1422f4556036",
+  "onnx_metadata": {}
+}

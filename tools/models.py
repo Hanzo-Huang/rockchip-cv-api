@@ -41,7 +41,8 @@ def prepare(spec, output):
             raise ValueError("Downloaded/copied model checksum mismatch")
         package = {key: value for key, value in spec.items() if key not in ("file", "url", "metadata", "labels")}
         package.update({"schema_version": 1, "file": "model.rknn"})
-        for key, filename in (("metadata", "metadata.yaml"), ("labels", "classes.txt")):
+        metadata_name = "metadata.json" if str(spec.get("metadata", "")).endswith(".json") else "metadata.yaml"
+        for key, filename in (("metadata", metadata_name), ("labels", "classes.txt")):
             if spec.get(key):
                 shutil.copyfile(checked_path(ROOT, spec[key]), staged / filename)
                 package[key] = filename
@@ -63,7 +64,8 @@ def main():
     if not selected:
         raise ValueError(f"Unknown model ID: {args.model}")
     if args.command == "matrix":
-        print(json.dumps({"include": [{key: spec[key] for key in ("id", "tag", "chip", "backend")} for spec in selected]}))
+        print(json.dumps({"include": [{**{key: spec[key] for key in ("id", "tag", "chip", "backend")},
+                                      "aliases": spec.get("aliases", [])} for spec in selected]}))
     elif args.command == "list":
         for spec in selected:
             print(f"{spec['id']:24} {spec['tag']:24} {spec['task']:16} {spec['backend']}")

@@ -34,6 +34,10 @@ def validate_spec(spec):
         raise ValueError(f"{spec['id']}: a SHA-256 checksum is required")
     if not isinstance(spec.get("nms", True), bool):
         raise ValueError(f"{spec['id']}: nms must be a boolean")
+    aliases = spec.get("aliases", [])
+    if not isinstance(aliases, list) or any(not isinstance(alias, str) or
+                                          not IDENTIFIER.fullmatch(alias) for alias in aliases):
+        raise ValueError(f"{spec['id']}: aliases must be a list of image tags")
 
 
 def load_catalog(path, root):
@@ -46,10 +50,11 @@ def load_catalog(path, root):
     ids, tags = set(), set()
     for spec in models:
         validate_spec(spec)
-        if spec["id"] in ids or spec["tag"] in tags:
+        model_tags = [spec["tag"], *spec.get("aliases", [])]
+        if spec["id"] in ids or len(set(model_tags)) != len(model_tags) or tags.intersection(model_tags):
             raise ValueError("Model IDs and image tags must be unique")
         ids.add(spec["id"])
-        tags.add(spec["tag"])
+        tags.update(model_tags)
         if bool(spec.get("file")) == bool(spec.get("url")):
             raise ValueError(f"{spec['id']}: provide exactly one of file or url")
         if spec.get("url") and urlsplit(spec["url"]).scheme != "https":

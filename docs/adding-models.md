@@ -12,7 +12,8 @@ a decoded YOLO head, separate scores/boxes, and a nine-output INT8 DFL layout.
 A model family name alone does not establish compatibility: inspect the RKNN
 input/output tensors and verify detections using a real image.
 
-YOLOv8, YOLOv10, and YOLO11 exports are future additions. Reuse `yolo` only when
+YOLO26 and YOLO11 n/s/m are packaged for both chips. YOLOv8 and YOLOv10
+exports are future additions. Reuse `yolo` only when
 the export matches a supported layout. Different layouts need native
 postprocessor changes or a separate adapter. In particular, do not assume
 that every end-to-end/NMS-free export is already supported.
@@ -33,15 +34,17 @@ uses this structure (replace the example checksum with the actual SHA-256):
   "chip": "rk3588",
   "task": "detection",
   "backend": "yolo",
-  "tag": "rk3588-yolo26",
-  "file": "models/yolo26n-rk3588/yolo26n_rk3588.rknn",
+  "tag": "rk3588-yolo26n",
+  "aliases": ["rk3588-yolo26"],
+  "url": "https://github.com/Hanzo-Huang/rockchip-cv-api/releases/download/models-20261106/yolo26n_rk3588.rknn",
   "sha256": "<64 lowercase hexadecimal characters>",
-  "metadata": "models/yolo26n-rk3588/metadata.yaml",
+  "metadata": "models/yolo26n-rk3588/metadata.json",
   "nms": true
 }
 ```
 
-- IDs and tags must be unique lowercase identifiers. Use distinct tags for
+- IDs, tags, and optional `aliases` must be unique lowercase identifiers.
+  Aliases publish extra tags for the same model image. Use distinct tags for
   model sizes, variants, and chips, for example `rk3588-yolov8n`.
 - `chip` is `rk3576` or `rk3588`. Export a separate RKNN model for each chip.
 - `backend` selects `rkapi/backends/<backend>.py`; it must exist.
@@ -69,7 +72,7 @@ python3 tools/models.py matrix --model yolo26n-rk3588
 
 docker build --platform linux/arm64 --target model \
   --build-arg MODEL_ID=yolo26n-rk3588 \
-  -t rockchip-cv-api:rk3588-yolo26 .
+  -t rockchip-cv-api:rk3588-yolo26n .
 ```
 
 The generic `model` target packages only the selected model in the final
@@ -130,3 +133,45 @@ If another adapter requires additional native bindings or dependencies, add
 those to the shared build explicitly. The adapter interface does not make
 arbitrary model formats work automatically. Keep runtime dependencies in the
 image so application developers continue to need only HTTP.
+
+## Reproduce the current conversions
+
+Conversion is a maintainer task on **x86 Linux**. Application developers use
+Docker images and do not need this environment. Use RKNN Toolkit 2.3.2 and its
+dependencies to match the bundled userspace runtime; the tool rejects other
+versions rather than producing an untested runtime combination.
+
+Prepare an ONNX export and a calibration list, then run:
+
+```bash
+python tools/convert.py \
+  --model yolo11n --chip rk3588 \
+  --onnx /path/to/yolo11n.onnx \
+  --dataset /path/to/COCO/coco_subset_20.txt \
+  --output /tmp/yolo11n-rk3588 \
+  --source-url https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolo11/yolo11n.onnx
+```
+
+The tool supports `yolo26n/s/m` and `yolo11n/s/m`, and either chip. It checks
+the static input and output layout, calibrates INT8, and writes the RKNN file
+plus `metadata.json` containing source/checksum, calibration fingerprint,
+compiler version, and output layout. Existing outputs are not overwritten.
+Relative calibration-image paths resolve against the dataset-list directory.
+
+For YOLO11, download the optimized ONNX exports from the
+[official Model Zoo](https://github.com/airockchip/rknn_model_zoo/tree/main/examples/yolo11).
+For YOLO26, use an Ultralytics static 640 × 640 ONNX export with
+`end2end=False`; the converter replaces the center/size concatenation with
+the existing anchor-corner tensors before stride multiplication, then selects
+the score and xyxy outputs. This distinction matters: a one-to-many `Mul_2`
+output otherwise contains xywh, which the split-output decoder cannot treat
+as xyxy. Do not feed a final `300 × 6` detection tensor to this adapter.
+Both sets of packages use NMS. The calibration subset is a functional starting
+point; measure accuracy on representative data for your deployment.
+
+Upload weights as assets of a versioned `models-*` release, keep metadata in
+`models/<id>/`, and point each catalog `url` at its released asset with the
+recorded SHA-256. Those releases skip image builds. Publishing an application
+release or pushing `main` builds the model images normally. Keep conversion
+logs, calibration images, ONNX files, and device smoke-test files outside the
+repository.

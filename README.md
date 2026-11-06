@@ -11,9 +11,9 @@ RKNN userspace runtime, hardware acceleration libraries, and API dependencies
 are packaged in the image. No RKNN toolkit, Python inference environment, or
 model setup is needed on your application machine.
 
-The current release provides **YOLO26 object detection on RK3576 and RK3588**.
-Each Docker image includes the matching YOLO26n model and starts the API
-service automatically.
+The current release provides **YOLO26 and YOLO11 object detection**, in
+**n, s, and m sizes**, on **RK3576 and RK3588**. Each Docker image includes
+the matching INT8 model and starts the API service automatically.
 
 [Quick start](#quick-start) · [Python example](#use-it-from-python) · [API reference](#api-reference) · [Camera and RTSP](#camera-and-rtsp) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
 
@@ -35,15 +35,35 @@ call the API; it does not need RKNN or the model installed locally.
 Each model/chip combination has its own Docker tag. One container serves one
 model; applications use the same `/api/predict` endpoint across images.
 
-| Chip | Bundled model | Catalog ID | Image tag |
-| --- | --- | --- | --- |
-| RK3576 | YOLO26n | `yolo26n-rk3576` | `rk3576-yolo26` |
-| RK3588 | YOLO26n | `yolo26n-rk3588` | `rk3588-yolo26` |
+| Model | RK3576 tag | RK3588 tag |
+| --- | --- | --- |
+| YOLO26n | `rk3576-yolo26n` | `rk3588-yolo26n` |
+| YOLO26s | `rk3576-yolo26s` | `rk3588-yolo26s` |
+| YOLO26m | `rk3576-yolo26m` | `rk3588-yolo26m` |
+| YOLO11n | `rk3576-yolo11n` | `rk3588-yolo11n` |
+| YOLO11s | `rk3576-yolo11s` | `rk3588-yolo11s` |
+| YOLO11m | `rk3576-yolo11m` | `rk3588-yolo11m` |
 
-These are the currently supported models. YOLOv8, YOLOv10, YOLO11, and other
-vision tasks can be added through the [model catalog and backend adapters](docs/adding-models.md);
-they are not bundled or verified yet. Changing the model family may change
-its result fields; `/api/models` reports the loaded model and task.
+Use image `ghcr.io/hanzo-huang/rockchip-cv-api:<tag>`. `n` is the smallest
+model; `s` and `m` offer larger models with higher compute requirements.
+The original `rk3576-yolo26` and `rk3588-yolo26` tags remain aliases for `n`.
+Catalog IDs are `<model>-<chip>`, for example `yolo11m-rk3588`.
+
+All 12 packages use 640 × 640 input and COCO's 80 classes. They are calibrated
+with the Model Zoo's 20-image COCO subset using Toolkit 2.3.2, matching the
+bundled runtime. YOLO26 uses two score/box outputs; YOLO11 uses nine optimized
+DFL outputs. These one-to-many exports use server-side NMS. Real-photo smoke
+tests check functional detection; they are not a full accuracy benchmark.
+
+Weights are versioned [release assets](https://github.com/Hanzo-Huang/rockchip-cv-api/releases/tag/models-20261106).
+The catalog pins their URLs and SHA-256 checksums; Docker downloads them during
+the build, so users never need to download weights separately. The repository
+keeps conversion metadata rather than duplicating large binaries.
+
+YOLOv8, YOLOv10, and other vision tasks can be added through the
+[model catalog and backend adapters](docs/adding-models.md). Changing the model
+family may change its result fields; `/api/models` reports the loaded model
+and task.
 
 ## Quick start
 
@@ -63,8 +83,8 @@ Images are built by GitHub Actions and published to the repository's
 Choose the tag matching your board:
 
 ```bash
-# RK3588. For RK3576, use :rk3576-yolo26 instead.
-IMAGE="ghcr.io/hanzo-huang/rockchip-cv-api:rk3588-yolo26"
+# RK3588. For RK3576, use :rk3576-yolo26n instead.
+IMAGE="ghcr.io/hanzo-huang/rockchip-cv-api:rk3588-yolo26n"
 
 docker run -d --name cv-api --restart unless-stopped \
   --privileged --network host \
@@ -75,6 +95,10 @@ docker run -d --name cv-api --restart unless-stopped \
 Docker pulls the image if needed and starts the API on **port 8000**. There is
 no separate model download, model mount, or Python startup command. The run
 command grants access to the board's hardware and uses the host network.
+
+To serve several models, run one container per model. Replace `--network host`
+with a distinct mapping such as `-p 8001:8000`, and give each container a unique
+name. Clients select the service by its port and keep using `/api/predict`.
 
 You can also [build from source](#build-from-source). Published GitHub
 Releases include image archives for [offline installation](#offline-installation).
@@ -242,7 +266,7 @@ docker run -d --name cv-api --restart unless-stopped \
   "$IMAGE"
 ```
 
-On RK3576, use the `rk3576-yolo26` image tag.
+On RK3576, use the `rk3576-yolo26n` image tag.
 
 To use a local video, mount its directory and set its path **inside** the
 container:
@@ -301,10 +325,10 @@ python3 tools/models.py list
 
 docker build --platform linux/arm64 --target model \
   --build-arg MODEL_ID=yolo26n-rk3588 \
-  -t rockchip-cv-api:rk3588-yolo26 .
+  -t rockchip-cv-api:rk3588-yolo26n .
 ```
 
-For RK3576, use `MODEL_ID=yolo26n-rk3576` and tag `rk3576-yolo26`.
+For RK3576, use `MODEL_ID=yolo26n-rk3576` and tag `rk3576-yolo26n`.
 Use that local image name in the quick-start run command.
 
 Optional build arguments `UBUNTU_MIRROR` and `PIP_INDEX_URL` select alternate
@@ -314,7 +338,8 @@ build time; users only choose an image tag.
 ## Build and publish with GitHub Actions
 
 The [image workflow](.github/workflows/images.yml) reads `models/catalog.json`
-and builds each entry on a native ARM64 runner:
+and builds the shared runtime once, then packages each entry on native ARM64
+runners (up to four model jobs at a time):
 
 - **Pull request:** build every model and check imports/package integrity; no publishing.
 - **Push to `main`:** publish each model tag to `ghcr.io/hanzo-huang/rockchip-cv-api`.
@@ -322,8 +347,11 @@ and builds each entry on a native ARM64 runner:
 - **Publish a release:** publish model tags plus versioned tags, and attach a
   compressed Docker image archive for each model to the GitHub Release.
 
-For example, release `v0.3.0` adds `:rk3588-yolo26-v0.3.0` alongside
-`:rk3588-yolo26`. Use a versioned tag when pinning an application deployment.
+Releases named `models-*` hold conversion assets only and skip image builds.
+Normal application releases still build images and attach offline archives.
+
+For example, release `v0.3.0` adds `:rk3588-yolo26n-v0.3.0` alongside
+`:rk3588-yolo26n`. Use a versioned tag when pinning an application deployment.
 The workflow uses `GITHUB_TOKEN`; no separate registry password is needed.
 After the first publish, set each GHCR package's visibility to **Public** if
 users should pull without signing in. ARM64 runner availability and Actions
@@ -331,11 +359,11 @@ permissions must be enabled for the repository.
 
 ### Offline installation
 
-Download the matching `rk3588-yolo26.tar.gz` or `rk3576-yolo26.tar.gz` asset
+Download the matching image archive, such as `rk3588-yolo26n.tar.gz`,
 from a published release, transfer it to the board, then load it:
 
 ```bash
-docker load -i rk3588-yolo26.tar.gz
+docker load -i rk3588-yolo26n.tar.gz
 ```
 
 Use the image name printed by `docker load` in the quick-start run command.
@@ -410,6 +438,7 @@ docker stop cv-api      # Stop the API
 ├── native/                 # Optimized C++ Rockchip inference engine
 ├── models/catalog.json     # Model packages and Docker tags
 ├── tools/models.py         # Validate, list, package, generate CI matrix
+├── tools/convert.py        # Maintainer-only INT8 ONNX → RKNN conversion
 ├── tools/setup-sdk.sh      # Pinned Rockchip SDK build dependencies
 ├── .github/workflows/      # ARM64 image publishing and release archives
 ├── docs/adding-models.md    # Contributor guide
@@ -424,5 +453,4 @@ at commit [`76035d3`](https://github.com/Hanzo-Huang/rockchip-yolo-cpp/commit/76
 The HTTP interface follows
 [Seeed's original API](https://github.com/Seeed-Projects/reComputer-RK-CV/tree/main/src/rk3588_yolo11).
 Model author, export, and license information is preserved in the
-[RK3576](models/yolo26n-rk3576/metadata.yaml) and
-[RK3588](models/yolo26n-rk3588/metadata.yaml) metadata files.
+[per-model conversion metadata](models/).
