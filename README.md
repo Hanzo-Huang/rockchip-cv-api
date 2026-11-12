@@ -30,7 +30,7 @@ Pick a model and tag from the [model catalog](#models),
 or [build the same image locally](#build-locally). Use a different container
 name and host port, such as `-p 8001:8000`, to serve a second model.
 
-**2. Send an image**
+**2. Check the model and send an image**
 
 Run this on the board or replace `localhost` with the board's IP address.
 
@@ -38,8 +38,13 @@ Run this on the board or replace `localhost` with the board's IP address.
 API=http://localhost:8000
 
 curl -fsS "$API/health"
+curl -fsS "$API/api/metadata"
 curl -fsS "$API/api/predict" -F "file=@image.jpg"
 ```
+
+Call `/api/metadata` when your client connects to discover the model's task,
+labels, and result format. See [Read model metadata](#read-model-metadata) for
+the response fields and raster decoding instructions.
 
 Use a local JPEG or PNG for `image.jpg`. Open `http://<board-ip>:8000/docs`
 for interactive requests.
@@ -72,12 +77,17 @@ the loaded model and timing fields.
 ### Python client
 
 Install `requests` in your application environment with
-`python -m pip install requests`.
+`python -m pip install requests`. This example selects the result field from
+the model metadata and prints boxes for the quick-start detection model.
 
 ```python
 import requests
 
 api = "http://localhost:8000"  # Use the board's IP when calling remotely.
+
+metadata_response = requests.get(f"{api}/api/metadata", timeout=10)
+metadata_response.raise_for_status()
+metadata = metadata_response.json()
 
 with open("image.jpg", "rb") as image:
     response = requests.post(
@@ -88,8 +98,10 @@ with open("image.jpg", "rb") as image:
     )
 
 response.raise_for_status()
-for item in response.json()["predictions"]:
-    print(item["class"], item["confidence"], item["box"])
+result = response.json()[metadata["output"]["field"]]
+if metadata["model"]["task"] == "detection":
+    for item in result:
+        print(item["class"], item["confidence"], item["box"])
 ```
 
 ## Models
@@ -145,6 +157,7 @@ the same INT8 image for builds and named prediction requests.
 | --- | --- | --- |
 | `GET` | `/health` | Check model and runtime status |
 | `GET` | `/api/models` | Identify the model loaded in this container |
+| `GET` | `/api/metadata` | Discover the model's labels, input size, and prediction format |
 | `POST` | `/api/predict` | Predict an image, a video frame, or the latest live frame |
 | `GET`, `POST` | `/api/config` | Read or update default confidence and NMS thresholds |
 | `GET` | `/api/video_feed` | Stream the configured source as annotated MJPEG |
@@ -164,6 +177,31 @@ defaults, POST JSON with `obj_thresh` and `nms_thresh` to `/api/config`.
 NMS runs in C++ when enabled for the export. The compatibility route
 `/api/models/{model_id}/predict` accepts the loaded ID, family, or a
 configured compatibility alias.
+
+### Read model metadata
+
+```sh
+curl -fsS "$API/api/metadata"
+```
+
+The JSON response includes `schema_version` (currently `1`), `model` (including
+its task), `model_input` (the network width and height), `class_count`, `labels`,
+and `output`. The index into `labels` is the zero-based `class_id`. The labels
+reflect `RK_CLASSES` when set. If the label list is empty, use the class ID
+directly. Depth has zero classes.
+
+Read `prediction[metadata["output"]["field"]]` from the prediction response to
+get the task's main result. When `output.item_field` is present, read that key
+from each item in the result array. `output.point_fields` gives the order of
+values in each keypoint or polygon vertex. Coordinates use source-image pixels.
+Use the prediction's `image.width` and `image.height` for the frame size.
+
+For raster results, expand each `[value, count]` pair in the flat `runs` array,
+then reshape the values into `height` rows of `width` samples. The raster's
+`box` locates it in the source image. Mask values are `0` or `1`, semantic
+values are class IDs, and depth samples use `offset + value * scale`. Skip the
+sentinel given by `output.raster.invalid_value` in the metadata before applying
+that formula.
 
 <details>
 <summary>Latency and configuration</summary>

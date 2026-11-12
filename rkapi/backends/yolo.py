@@ -20,6 +20,32 @@ COCO = ("person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic lig
         "teddy bear,hair drier,toothbrush").split(",")
 
 
+def prediction_output(task, package):
+    field = {"classify": "classification", "semantic": "semantic", "depth": "depth"}.get(
+        task, "predictions")
+    output = {"field": field}
+    if task != "classify":
+        output["coordinate_space"] = "source_image_pixels"
+
+    if task == "pose":
+        output.update(item_field="keypoints", point_fields=["x", "y", "confidence"],
+                      keypoint_count=package.get("kpt_shape", [17])[0])
+    elif task == "obb":
+        output.update(item_field="polygon", point_fields=["x", "y"], point_count=4)
+    elif task == "segment":
+        output["item_field"] = "mask"
+
+    if task in ("segment", "semantic", "depth"):
+        output["raster"] = {
+            "encoding": "rle", "order": "row_major", "run_order": ["value", "count"],
+            "box_order": ["x1", "y1", "x2", "y2"],
+            "values": {"segment": "binary", "semantic": "class_id", "depth": "quantized_depth"}[task],
+        }
+        if task == "depth":
+            output["raster"]["invalid_value"] = 65536
+    return output
+
+
 class Backend(BaseBackend):
     def __init__(self, package):
         super().__init__()
@@ -42,6 +68,14 @@ class Backend(BaseBackend):
                 self.labels = [line.strip() for line in f if line.strip()]
             if len(self.labels) != self.description["classes"]:
                 raise ValueError("class file must have one label per model class")
+        task = package["task"]
+        self.prediction_metadata = {
+            "model_input": {"width": self.description["input_width"],
+                            "height": self.description["input_height"]},
+            "class_count": self.description["classes"] if task != "depth" else 0,
+            "labels": self.labels if task != "depth" else [],
+            "output": prediction_output(task, package),
+        }
         self.live = None
         if source := os.getenv("RK_SOURCE"):
             self.live = _native.Live(source, model, int(os.getenv("RK_WORKERS", "0")), encoded_options)

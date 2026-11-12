@@ -94,6 +94,13 @@ def models():
     return {"models": [app.state.runtime.model_info]}
 
 
+@app.get("/api/metadata")
+def metadata():
+    """Describe how to interpret predictions from the loaded model."""
+    rt = app.state.runtime
+    return {"schema_version": 1, "model": rt.model_info, **rt.prediction_metadata}
+
+
 @app.get("/api/config")
 def get_config():
     rt = app.state.runtime

@@ -16,6 +16,7 @@ class BaseBackend(ABC):
         self.config = {"obj_thresh": 0.25, "nms_thresh": 0.45}
         self.config_lock = threading.Lock()
         self.description = {}
+        self.prediction_metadata = {}
 
     def thresholds(self, conf, iou):
         with self.config_lock:
