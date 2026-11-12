@@ -1,0 +1,157 @@
+name: Model images
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Catalog ID (empty builds every model)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  catalog:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.catalog.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - id: catalog
+        env:
+          MODEL_ID: ${{ inputs.model }}
+        run: |
+          python3 tools/models.py validate
+          args=()
+          if [ -n "$MODEL_ID" ]; then args=(--model "$MODEL_ID"); fi
+          matrix=$(python3 tools/models.py matrix "${args[@]}")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  runtime:
+    needs: catalog
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+        with:
+          # Use the runner network for the BuildKit daemon's DNS forwarding.
+          driver-opts: network=host
+      - name: Build shared native engine and runtime
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
+
+  build:
+    name: Build ${{ matrix.package }}:${{ matrix.tag }}
+    needs: [catalog, runtime]
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix) }}
+    permissions:
+      contents: write # Upload image archives on published releases.
+      packages: write # Publish GHCR images using GITHUB_TOKEN.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          IMAGE_PACKAGE: ${{ matrix.package }}
+          IMAGE_TAG: ${{ matrix.tag }}
+          LEGACY_TAG: ${{ matrix.legacy_tag }}
+          IMAGE_ALIASES: ${{ join(matrix.aliases, ' ') }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          legacy_image="ghcr.io/${REPOSITORY,,}"
+          image="$legacy_image/$IMAGE_PACKAGE"
+          echo "ref=$image:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "legacy_ref=$legacy_image:$LEGACY_TAG" >> "$GITHUB_OUTPUT"
+          read -r -a aliases <<< "$IMAGE_ALIASES"
+          refs=("$image:$IMAGE_TAG")
+          for tag in "$LEGACY_TAG" "${aliases[@]}"; do
+            refs+=("$legacy_image:$tag")
+          done
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${refs[@]}"
+            if [ -n "$RELEASE_TAG" ]; then
+              version=$(printf '%s' "$RELEASE_TAG" | sed 's/[^a-zA-Z0-9_.-]/-/g' | cut -c1-80)
+              printf '%s\n' "${refs[@]/%/-$version}"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+      - uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: model
+          platforms: linux/arm64
+          build-args: MODEL_ID=${{ matrix.id }}
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          push: false
+          load: true
+          provenance: false
+          cache-from: |
+            type=gha,scope=${{ matrix.id }}
+            type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=${{ matrix.id }}
+      - name: Check imports without NPU hardware
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          docker run --rm --entrypoint python "$IMAGE" -c 'import importlib; from rkapi import _native; from rkapi.app import app; from rkapi.backends.base import BaseBackend; from rkapi.packages import load_package; p = load_package("/opt/model/package.json"); adapter = importlib.import_module("rkapi.backends." + p["backend"]); assert issubclass(adapter.Backend, BaseBackend); app.openapi(); print(p["id"], app.title)'
+      - name: Publish checked images
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_TAGS: ${{ steps.image.outputs.tags }}
+        run: |
+          while IFS= read -r image; do
+            docker push "$image"
+          done <<< "$IMAGE_TAGS"
+      - name: Attach offline image to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+          LEGACY_IMAGE: ${{ steps.image.outputs.legacy_ref }}
+          IMAGE_TAG: ${{ matrix.legacy_tag }}
+        run: |
+          archive="$RUNNER_TEMP/$IMAGE_TAG.tar.gz"
+          docker save "$IMAGE" "$LEGACY_IMAGE" | gzip > "$archive"
+          gh release upload "$RELEASE_TAG" "$archive" --clobber

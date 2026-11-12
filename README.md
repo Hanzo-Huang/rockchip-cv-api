@@ -1,0 +1,267 @@
+# Rockchip CV API
+
+**Run computer vision on RK3576 and RK3588. Build your app with HTTP.**
+
+Start a Docker container on your Rockchip board and send an image to
+`POST /api/predict`. Each image includes the model, RKNN userspace runtime,
+and a C++ engine that uses the NPU for inference and RGA for preprocessing.
+Your app can call it from any machine with an HTTP client.
+
+[Quick start](#quick-start) · [Models](#models) · [API](#api) · [Video](#video) · [Build and publish](#build-and-publish)
+
+## Quick start
+
+You need an **RK3576 or RK3588 board** running ARM64 Linux with Docker and
+working NPU, RGA, and MPP drivers supplied by the board OS.
+
+**1. Start YOLO26 object detection on the board**
+
+```sh
+CHIP=rk3588  # Use rk3576 on an RK3576 board.
+IMAGE="ghcr.io/hanzo-huang/rockchip-cv-api/yolo26n:${CHIP}-int8"
+
+docker run -d --name cv-api --restart unless-stopped \
+  --privileged -p 8000:8000 \
+  -v /proc/device-tree/compatible:/proc/device-tree/compatible:ro \
+  "$IMAGE"
+```
+
+Pick a model and tag from the [model catalog](#models),
+or [build the same image locally](#build-locally). Use a different container
+name and host port, such as `-p 8001:8000`, to serve a second model.
+
+**2. Send an image**
+
+Run this on the board or replace `localhost` with the board's IP address.
+
+```sh
+API=http://localhost:8000
+
+curl -fsS "$API/health"
+curl -fsS "$API/api/predict" -F "file=@image.jpg"
+```
+
+Use a local JPEG or PNG for `image.jpg`. Open `http://<board-ip>:8000/docs`
+for interactive requests.
+
+<details>
+<summary>Example detection response</summary>
+
+```json
+{
+  "success": true,
+  "source": "image",
+  "predictions": [
+    {
+      "class": "person",
+      "class_id": 0,
+      "confidence": 0.92,
+      "box": {"x1": 100, "y1": 200, "x2": 300, "y2": 500}
+    }
+  ],
+  "image": {"width": 1280, "height": 720}
+}
+```
+
+This excerpt shows bounding boxes in original image pixels. A frame with
+no detections returns an empty `predictions` array. Responses also include
+the loaded model and timing fields.
+
+</details>
+
+### Python client
+
+Install `requests` in your application environment with
+`python -m pip install requests`.
+
+```python
+import requests
+
+api = "http://localhost:8000"  # Use the board's IP when calling remotely.
+
+with open("image.jpg", "rb") as image:
+    response = requests.post(
+        f"{api}/api/predict",
+        files={"file": image},
+        data={"conf": 0.3},
+        timeout=30,
+    )
+
+response.raise_for_status()
+for item in response.json()["predictions"]:
+    print(item["class"], item["confidence"], item["box"])
+```
+
+## Models
+
+**YOLO26** supports sizes `n`, `s`, and `m` in `int8` and `fp16` on both
+boards. Start with `n` for the smallest model. Each tag serves one model,
+and Docker can reuse common runtime layers across images from the same build.
+
+**YOLO11** provides INT8 object detection in `n`, `s`, and `m` sizes on both
+boards. Use `yolo11n:rk3588-int8` or `yolo11n:rk3576-int8` for the nano model.
+The build downloads each model and its metadata from a pinned Hugging Face
+revision and checks both SHA-256 hashes.
+
+Image names below use the prefix `ghcr.io/hanzo-huang/rockchip-cv-api/`.
+
+| Task | Example RK3588 image | Prediction result |
+| --- | --- | --- |
+| Object detection | `yolo26n:rk3588-int8` | `predictions` with boxes and scores |
+| Instance segmentation | `yolo26n-seg:rk3588-int8` | `predictions[].mask` |
+| Pose estimation | `yolo26n-pose:rk3588-int8` | `predictions[].keypoints` as `[x, y, confidence]` |
+| Oriented boxes | `yolo26n-obb:rk3588-int8` | `predictions[].polygon` with four corners |
+| Classification | `yolo26n-cls:rk3588-int8` | `classification` with ranked classes |
+| Semantic segmentation | `yolo26n-sem:rk3588-int8` | `semantic` raster and class labels |
+| Depth estimation | `yolo26n-depth:rk3588-int8` | `depth` raster |
+
+Replace `rk3588` with `rk3576` for the other board, or `int8` with `fp16`
+to change precision. Run `python3 tools/models.py list` for all image tags
+and build IDs in the [model catalog](models/).
+
+<details>
+<summary>Raster format and compatibility tags</summary>
+
+Masks, semantic maps, and depth maps have `width`, `height`, `box`, and
+`runs`. The box locates the raster in the source image. Runs alternate value
+and count in row-major order. Semantic values are class IDs. Recover depth
+samples with `offset + value * scale`. The value `65536` marks invalid depth.
+
+The workflow also publishes the existing references under
+`ghcr.io/hanzo-huang/rockchip-cv-api`. YOLO26 detection tags there without a
+precision suffix, such as `rk3588-yolo26n`,
+are aliases for the corresponding Hugging Face INT8 images. The shorter
+`rk3576-yolo26` and `rk3588-yolo26` aliases select the nano variant. These
+images use the end-to-end export, which handles detection selection in the
+model. The catalog lists the precision-suffixed ID, such as
+`yolo26n-rk3588-int8`. Existing IDs without a precision suffix still select
+the same INT8 image for builds and named prediction requests.
+
+</details>
+
+## API
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Check model and runtime status |
+| `GET` | `/api/models` | Identify the model loaded in this container |
+| `POST` | `/api/predict` | Predict an image, a video frame, or the latest live frame |
+| `GET`, `POST` | `/api/config` | Read or update default confidence and NMS thresholds |
+| `GET` | `/api/video_feed` | Stream the configured source as annotated MJPEG |
+| `GET` | `/docs`, `/openapi.json` | Browse or export the API schema |
+
+Send an image as multipart `file` or a clip as `video`. For a clip, set
+`timestamp` in seconds to select one frame. It defaults to `0`.
+A POST with no upload predicts the latest frame from `RK_SOURCE`.
+
+```sh
+curl -fsS "$API/api/predict" -F "video=@clip.mp4" -F "timestamp=1.5"
+```
+
+Optional multipart fields `conf` and `iou` override thresholds for one
+request. Their initial defaults are `0.25` and `0.45`. To update service
+defaults, POST JSON with `obj_thresh` and `nms_thresh` to `/api/config`.
+NMS runs in C++ when enabled for the export. The compatibility route
+`/api/models/{model_id}/predict` accepts the loaded ID, family, or a
+configured compatibility alias.
+
+<details>
+<summary>Latency and configuration</summary>
+
+The response body reports stage timings in milliseconds, including upload
+storage, decoding, context wait, DMA upload, RGA preprocessing,
+`rknn_run_ms`, `output_get_ms`, and postprocessing. `nms_ms`, when present,
+is part of `postprocess_ms`. The `Server-Timing` header reports request
+parsing, receive wait, response encoding, and total server time before
+response headers. Several timings overlap. Measure the full request on
+the client to include transport and response delivery.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `RK_NMS` | Model setting | Enable or disable server NMS with `on` or `off` |
+| `RK_SOURCE` | Unset | RTSP URL, mounted video file, or H.264 V4L2 device |
+| `RK_WORKERS` | `0` | Automatic live worker count, or `1` for a single context |
+| `RK_MAX_UPLOAD_MB` | `128` | Maximum upload size in MB |
+| `RK_CLASSES` | Packaged labels | Override labels with one class per line |
+| `RK_PACKAGE` | `/opt/model/package.json` | Model package manifest path |
+
+Use `docker logs cv-api` to investigate startup failures. Check that the
+image tag matches the board and its kernel drivers are available.
+HTTP 503 on a live request means the source is unavailable or has yet to
+provide a usable frame.
+
+</details>
+
+## Video
+
+For continuous prediction, add `-e RK_SOURCE=rtsp://192.168.1.10/live` to
+the Docker run command. For a local video, pass
+`-v "$PWD/media:/media:ro" -e RK_SOURCE=/media/input.mp4`.
+An H.264 V4L2 camera can use `-e RK_SOURCE=/dev/video0`.
+
+Continuous H.264/H.265 sources use MPP hardware decoding. Once a frame is
+ready, call `curl -fsS -X POST "$API/api/predict"` for the latest result or
+open `http://<board-ip>:8000/api/video_feed` for the MJPEG preview. The
+preview draws detection boxes. Clients can render additional task results
+from the API. Local files follow media timestamps and retain the last
+result at EOF.
+
+## Build and publish
+
+### Build locally
+
+Build on ARM64 using a model ID from the catalog. Inference requires
+the matching Rockchip board.
+
+```sh
+python3 tools/models.py list
+
+docker build --platform linux/arm64 --target model \
+  --build-arg MODEL_ID=yolo26n-rk3588-int8 \
+  -t yolo26n:rk3588-int8 .
+```
+
+Set `IMAGE=yolo26n:rk3588-int8` in the quick-start command to
+run the local build. To add a model, follow the manifest structure and
+validation steps in [AGENTS.md](AGENTS.md).
+
+### GitHub Actions
+
+The [Model images workflow](.github/workflows/images.yml) validates the
+catalog, builds and caches the shared runtime, then builds model images
+on native ARM64 runners. It checks imports and package integrity before
+publishing to GHCR. Use the matching board to verify NPU inference.
+
+| Trigger | Result |
+| --- | --- |
+| Pull request | Build and check model images |
+| Push to `main` | Build and publish every model tag |
+| Manual run | Publish one catalog ID, or every model if the input is empty |
+| Application release | Publish model tags and versioned tags, and attach offline Docker archives |
+
+For an offline install, download a matching archive from a published release
+and run `docker load -i rk3588-yolo26n-int8.tar.gz` on the board.
+
+<details>
+<summary>Publishing from a fresh GitHub repository</summary>
+
+1. If you reuse an existing GHCR package, grant the new repository **Write**
+   access under the package's **Manage Actions access** settings. The workflow
+   uses `GITHUB_TOKEN`. After the first publish to each model package, set its
+   visibility to **Public** for anonymous pulls.
+   [GHCR package permissions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
+2. In **Actions → Model images → Run workflow**, enter `yolo26n-rk3588-int8`
+   to publish one image. Run it on the matching board and check `/health`,
+   `/api/models`, and a real-image prediction before publishing the full matrix.
+
+</details>
+
+## Credits
+
+The C++ inference engine draws from [rockchip-yolo-cpp](https://github.com/Hanzo-Huang/rockchip-yolo-cpp).
+The HTTP interface follows [Seeed's Rockchip CV API](https://github.com/Seeed-Projects/reComputer-RK-CV/tree/main/src/rk3588_yolo11).
+The model packages use weights and conversion metadata from
+[HanzoHuang/YOLO26-RKNN2](https://huggingface.co/HanzoHuang/YOLO26-RKNN2) and
+[HanzoHuang/YOLO11-RKNN2](https://huggingface.co/HanzoHuang/YOLO11-RKNN2).
+Model manifests and metadata record provenance, license information, and the
+SHA-256 checksums used during packaging.
