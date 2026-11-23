@@ -138,6 +138,9 @@ Masks, semantic maps, and depth maps have `width`, `height`, `box`, and
 `runs`. The box locates the raster in the source image. Runs alternate value
 and count in row-major order. Semantic values are class IDs. Recover depth
 samples with `offset + value * scale`. The value `65536` marks invalid depth.
+YOLO26 Depth packages resize frames to fill the model input using RGA. Their
+manifest's `runtime_preprocess` selects this resize while `preprocess` records
+the conversion metadata.
 
 The workflow also publishes the existing references under
 `ghcr.io/hanzo-huang/rockchip-cv-api`. YOLO26 detection tags there without a

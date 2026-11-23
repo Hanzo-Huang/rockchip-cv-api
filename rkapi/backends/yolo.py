@@ -58,10 +58,14 @@ class Backend(BaseBackend):
                    if key in package}
         options.update(task="detect" if package["task"] == "detection" else package["task"],
                        nms=nms_mode == "on")
+        if "runtime_preprocess" in package:
+            options["preprocess"] = package["runtime_preprocess"]
         encoded_options = json.dumps(options)
         self.predictor = _native.Predictor(model, encoded_options)
         self.description = json.loads(self.predictor.description())
         self.description["chip"] = package["chip"]
+        self.description["input_transform"] = options.get(
+            "preprocess", "center_crop" if package["task"] == "classify" else "letterbox")
         self.labels = COCO if self.description["classes"] == 80 else []
         if path := os.getenv("RK_CLASSES", package.get("labels")):
             with open(path, encoding="utf-8") as f:
