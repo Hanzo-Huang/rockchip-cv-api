@@ -47,7 +47,7 @@ struct ModelOptions
     int classes = 0;
     int keypoints = 17, keypoint_dimensions = 3;
     bool normalized = false, end_to_end = false;
-    bool center_crop = false;
+    InputTransform input_transform = InputTransform::Letterbox;
     bool apply_nms = true;
     DenseResize dense_resize = DenseResize::None;
     Head head = Head::Auto;

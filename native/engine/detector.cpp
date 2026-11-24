@@ -264,7 +264,7 @@ Detector::Detector(const std::string &model, float threshold, float iou,
             output_.resize(output_attr_.n_elems);
         }
         preprocessor_ = std::make_unique<Preprocessor>(*input_, width_, height_, stride_,
-                                                       options_.center_crop, has_text ? 0 : 114);
+                                                       options_.input_transform, has_text ? 0 : 114);
         rknn_sdk_version version{};
         require(rknn_query(context_, RKNN_QUERY_SDK_VERSION, &version, sizeof(version)) == 0,
                 "query RKNN version");
