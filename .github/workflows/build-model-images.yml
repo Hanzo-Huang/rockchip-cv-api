@@ -1,0 +1,105 @@
+name: Build model images for one chip
+
+on:
+  workflow_call:
+    inputs:
+      models:
+        description: Model image matrix for the selected chip
+        type: string
+        required: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}:${{ matrix.tag }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(inputs.models) }}
+    permissions:
+      contents: write # Upload image archives on published releases.
+      packages: write # Publish GHCR images using GITHUB_TOKEN.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          IMAGE_PACKAGE: ${{ matrix.package }}
+          IMAGE_TAG: ${{ matrix.tag }}
+          LEGACY_TAG: ${{ matrix.legacy_tag }}
+          IMAGE_ALIASES: ${{ join(matrix.aliases, ' ') }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          legacy_image="ghcr.io/${REPOSITORY,,}"
+          image="$legacy_image/$IMAGE_PACKAGE"
+          echo "ref=$image:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "legacy_ref=$legacy_image:$LEGACY_TAG" >> "$GITHUB_OUTPUT"
+          read -r -a aliases <<< "$IMAGE_ALIASES"
+          refs=("$image:$IMAGE_TAG")
+          for tag in "$LEGACY_TAG" "${aliases[@]}"; do
+            refs+=("$legacy_image:$tag")
+          done
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${refs[@]}"
+            if [ -n "$RELEASE_TAG" ]; then
+              version=$(printf '%s' "$RELEASE_TAG" | sed 's/[^a-zA-Z0-9_.-]/-/g' | cut -c1-80)
+              printf '%s\n' "${refs[@]/%/-$version}"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+      - uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: model
+          platforms: linux/arm64
+          build-args: MODEL_ID=${{ matrix.id }}
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          push: false
+          load: true
+          provenance: false
+          cache-from: |
+            type=gha,scope=${{ matrix.id }}
+            type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=${{ matrix.id }}
+      - name: Check imports without NPU hardware
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          docker run --rm --entrypoint python "$IMAGE" -c 'import importlib; from rkapi import _native; from rkapi.app import app; from rkapi.backends.base import BaseBackend; from rkapi.packages import load_package; p = load_package("/opt/model/package.json"); adapter = importlib.import_module("rkapi.backends." + p["backend"]); assert issubclass(adapter.Backend, BaseBackend); app.openapi(); print(p["id"], app.title)'
+      - name: Publish checked images
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_TAGS: ${{ steps.image.outputs.tags }}
+        run: |
+          while IFS= read -r image; do
+            docker push "$image"
+          done <<< "$IMAGE_TAGS"
+      - name: Attach offline image to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+          LEGACY_IMAGE: ${{ steps.image.outputs.legacy_ref }}
+          IMAGE_TAG: ${{ matrix.legacy_tag }}
+        run: |
+          archive="$RUNNER_TEMP/$IMAGE_TAG.tar.gz"
+          docker save "$IMAGE" "$LEGACY_IMAGE" | gzip > "$archive"
+          gh release upload "$RELEASE_TAG" "$archive" --clobber

@@ -110,10 +110,26 @@ if metadata["model"]["task"] == "detection":
 boards. Start with `n` for the smallest model. Each tag serves one model,
 and Docker can reuse common runtime layers across images from the same build.
 
-**YOLO11** provides INT8 object detection in `n`, `s`, and `m` sizes on both
-boards. Use `yolo11n:rk3588-int8` or `yolo11n:rk3576-int8` for the nano model.
-The build downloads each model and its metadata from a pinned Hugging Face
-revision and checks both SHA-256 hashes.
+The catalog includes these RKNN Toolkit 2.3.2 builds for both boards in
+`int8` and `fp16`.
+
+| Family | Sizes or variants | Tasks |
+| --- | --- | --- |
+| YOLOv5 | `n`, `s`, `m`, plus `s-relu` for detection | Detection, instance segmentation, classification |
+| YOLOv6 | `n`, `s`, `m` | Detection |
+| YOLOv7 | Base, `tiny` | Detection |
+| YOLOv8, YOLO11 | `n`, `s`, `m` | Detection, instance segmentation, pose, oriented boxes, classification |
+| YOLOv10 | `n`, `s`, `m`, `b`, `l`, `x` | Detection |
+| YOLOX | `nano`, `s`, `m` | Detection |
+| PP-YOLOE | `s`, `m` | Detection |
+| YOLO-World | `v2s`, `v2m` | Detection with the model zoo’s fixed COCO vocabulary |
+
+The build verifies SHA-256 checksums for weights and metadata pinned to
+Hugging Face revisions. YOLO-World packages also verify the precomputed COCO
+text embeddings pinned to the RKNN Model Zoo source revision. The embeddings
+serve as the detector’s second input and let the image bundle one RKNN model.
+These packages use the published YOLOv8 COCO labels, which follow the same
+class order as the embeddings.
 
 Image names below use the prefix `ghcr.io/hanzo-huang/rockchip-cv-api/`.
 
@@ -301,8 +317,8 @@ and run `docker load -i rk3588-yolo26n-int8.tar.gz` on the board.
 
 The C++ inference engine draws from [rockchip-yolo-cpp](https://github.com/Hanzo-Huang/rockchip-yolo-cpp).
 The HTTP interface follows [Seeed's Rockchip CV API](https://github.com/Seeed-Projects/reComputer-RK-CV/tree/main/src/rk3588_yolo11).
-The model packages use weights and conversion metadata from
-[HanzoHuang/YOLO26-RKNN2](https://huggingface.co/HanzoHuang/YOLO26-RKNN2) and
-[HanzoHuang/YOLO11-RKNN2](https://huggingface.co/HanzoHuang/YOLO11-RKNN2).
-Model manifests and metadata record provenance, license information, and the
-SHA-256 checksums used during packaging.
+Model manifests pin weights and metadata from the
+[HanzoHuang model repositories](https://huggingface.co/HanzoHuang/models).
+The model cards identify upstream exports from the
+[RKNN Model Zoo](https://github.com/airockchip/rknn_model_zoo) and the
+additional variants built using its export layouts.
