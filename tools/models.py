@@ -6,7 +6,10 @@ import json
 import shutil
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
+from http.client import IncompleteRead
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,16 +37,26 @@ def image_references(models):
 
 
 def download(url, target, checksum):
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            if not response.url.startswith("https://"):
-                raise ValueError(f"Download redirected to an insecure URL: {url}")
-            with target.open("wb") as stream:
-                shutil.copyfileobj(response, stream)
-    except OSError as error:
-        raise ValueError(f"Could not download {url}: {error}") from error
-    if sha256(target) != checksum:
-        raise ValueError(f"Checksum mismatch: {url}")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                if not response.url.startswith("https://"):
+                    raise ValueError(f"Download redirected to an insecure URL: {url}")
+                with target.open("wb") as stream:
+                    shutil.copyfileobj(response, stream)
+        except urllib.error.HTTPError as error:
+            failure = f"Could not download {url}: {error}"
+            if error.code not in (408, 429) and not 500 <= error.code < 600:
+                raise ValueError(failure) from error
+        except (OSError, IncompleteRead) as error:
+            failure = f"Could not download {url}: {error}"
+        else:
+            if sha256(target) == checksum:
+                return
+            failure = f"Checksum mismatch: {url}"
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+    raise ValueError(failure)
 
 
 def prepare_remote_metadata(spec, staged, package):
@@ -57,7 +70,8 @@ def prepare_remote_metadata(spec, staged, package):
     if "precision" in info:
         expected["precision"] = spec["precision"]
     expected.update({key: spec[key] for key in ("end2end", "coordinates", "preprocess",
-                                               "dense_resize", "kpt_shape") if key in spec})
+                                               "dense_resize", "kpt_shape", "head", "anchors")
+                     if key in spec})
     defaults = {"dense_resize": "none", "coordinates": "pixels", "preprocess": "letterbox",
                 "end2end": False}
     for key, value in expected.items():
@@ -88,9 +102,13 @@ def prepare(spec, output):
         model = staged / "model.rknn"
         download(spec["url"], model, spec["sha256"])
         package = {key: value for key, value in spec.items()
-                   if key not in ("url", "metadata_url")}
+                   if key not in ("url", "metadata_url", "text_embeddings_url")}
         package.update({"schema_version": 1, "file": "model.rknn"})
         prepare_remote_metadata(spec, staged, package)
+        if "text_embeddings_url" in spec:
+            embeddings = staged / "text_embeddings.npy"
+            download(spec["text_embeddings_url"], embeddings, spec["text_embeddings_sha256"])
+            package["text_embeddings"] = embeddings.name
         (staged / "package.json").write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
         (staged / marker).touch()
         if output.exists():

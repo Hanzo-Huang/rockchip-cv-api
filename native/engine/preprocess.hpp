@@ -22,13 +22,14 @@ class Preprocessor
     int width_, height_, stride_;
     DmaBuffer &input_;
     bool painted_ = false, center_crop_ = false;
+    int pad_value_;
     Geometry previous_;
 
     rga_buffer_t resize_buffer(size_t slot, int width, int height);
 
 public:
     Preprocessor(DmaBuffer &input, int width, int height, int stride,
-                 bool center_crop = false);
+                 bool center_crop = false, int pad_value = 114);
     ~Preprocessor();
 
     Preprocessor(const Preprocessor &) = delete;

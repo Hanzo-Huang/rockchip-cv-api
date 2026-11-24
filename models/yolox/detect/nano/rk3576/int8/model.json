@@ -1,0 +1,23 @@
+{
+  "id": "yolox-nano-rk3576-int8",
+  "name": "YOLOX-nano",
+  "family": "yolox",
+  "chip": "rk3576",
+  "task": "detection",
+  "backend": "yolo",
+  "tag": "rk3576-yolox-nano-int8",
+  "url": "https://huggingface.co/HanzoHuang/YOLOX-RKNN2/resolve/07e796197678386dfef0afe9f9ffd54a3b1e798e/models/v2.3.2/detect/yolox_nano/rk3576/int8/model.rknn",
+  "sha256": "69ce024a4558da9ab098b25d17d16950316ded4830455148db3d2be96866a240",
+  "nms": true,
+  "size": "nano",
+  "precision": "int8",
+  "metadata_url": "https://huggingface.co/HanzoHuang/YOLOX-RKNN2/resolve/07e796197678386dfef0afe9f9ffd54a3b1e798e/models/v2.3.2/detect/yolox_nano/rk3576/int8/metadata.yaml",
+  "metadata_sha256": "56c50cb7253615ac136226b7314c96e4702253adc80db792554a83d687580e6c",
+  "classes": 80,
+  "end2end": false,
+  "coordinates": "pixels",
+  "preprocess": "letterbox",
+  "dense_resize": "none",
+  "conversion": "model-zoo-inspired",
+  "head": "yolox"
+}
